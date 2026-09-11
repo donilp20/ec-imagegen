@@ -16,11 +16,6 @@ class StorageBackend(ABC):
 
     @staticmethod
     def build_key(*, batch_id: str, name: str, ext: str) -> str:
-        """
-        e.g. batch_id=..., name='source' -> '<batch_id>/source_20260911_142033.jpeg'
-             batch_id=..., name='restyle_0' -> '<batch_id>/restyle_0_20260911_142240.jpg'
-        Timestamp is included so re-runs / retries never collide on the same key.
-        """
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         ext = ext.lstrip(".")
         return f"{batch_id}/{name}_{timestamp}.{ext}"
@@ -35,13 +30,15 @@ class LocalStorage(StorageBackend):
         path = self._base_dir / key
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-        return str(path)
+
+        relative_path = Path(self._base_dir.name) / key
+        return str(relative_path)
 
     def read(self, path: str) -> bytes:
         source_path = Path(path)
         if not source_path.is_absolute():
             if source_path.parts and source_path.parts[0] == self._base_dir.name:
-                # Support paths persisted by older versions as `storage/...`.
+                # Handles the relative "storage\..." format saved above.
                 source_path = self._base_dir.parent / source_path
             else:
                 source_path = self._base_dir / source_path
