@@ -7,10 +7,26 @@ from app.db.database import SessionLocal
 from app.db.models import ImageJob, JobStatus
 from app.inference.base import InferenceError
 from app.inference.replicate_provider import get_restyle_provider
+from app.services.prompt_builder import build_restyle_prompt
 from app.services.storage import get_storage
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+def _short_error_message(e: Exception, *, max_lines: int = 2, max_len: int = 300) -> str:
+    """
+    Keeps only the first `max_lines` lines of the exception's string form,
+    capped at `max_len` characters total. Full detail (status codes, links,
+    stack traces) still goes to the logger — this is only what's stored in
+    the DB, so the jobs table stays readable instead of filling with
+    multi-line provider dumps.
+    """
+    text = str(e).strip()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    short = " ".join(lines[:max_lines])
+    if len(short) > max_len:
+        short = short[: max_len - 1].rstrip() + "…"
+    return short
 
 
 def _batch_status_counts(db, batch_id: str) -> tuple[int, int, int]:
@@ -27,7 +43,12 @@ def process_image_job(job_id: int) -> None:
 
     Image-to-image restyle only: every job reads the merchant's uploaded
     source photo from storage and sends it + a prompt to Replicate/Flux
-    Kontext.
+    Kontext. The prompt itself is not stored in the DB (it's fully
+    deterministic from variation_index + extra_styling), so it's rebuilt
+    here and logged for debugging.
+
+    job.error_message stores a short, human-readable summary only — full
+    technical detail always goes to the logger, never to the DB.
 
     IMPORTANT: every failure path below must update the job's status in the
     DB. If an exception type isn't caught here, the job silently stays stuck
@@ -62,10 +83,20 @@ def process_image_job(job_id: int) -> None:
                     f"Restyle job {job_id} has no source_image_path", retryable=False
                 )
             source_bytes = storage.read(job.source_image_path)
+
+            prompt = build_restyle_prompt(job.extra_styling, variation_index=job.variation_index)
+            logger.info(
+                "restyle_prompt job_id=%s batch_id=%s variation_index=%s prompt=%r",
+                job.id,
+                job.batch_id,
+                job.variation_index,
+                prompt,
+            )
+
             provider = get_restyle_provider(settings)
             result = asyncio.run(
                 provider.generate(
-                    prompt=job.prompt,
+                    prompt=prompt,
                     model=settings.RESTYLE_MODEL,
                     size=settings.IMAGE_SIZE,
                     input_image=source_bytes,
@@ -74,7 +105,7 @@ def process_image_job(job_id: int) -> None:
 
         except InferenceError as e:
             job.status = JobStatus.FAILED
-            job.error_message = str(e)
+            job.error_message = _short_error_message(e)  # short, DB-safe
             db.commit()
             total_seconds = time.perf_counter() - started_at
             provider_seconds = time.perf_counter() - provider_started_at
@@ -92,7 +123,7 @@ def process_image_job(job_id: int) -> None:
                 batch_completed,
                 batch_failed,
                 batch_total,
-                e,
+                e,  # full detail — terminal/log only
             )
             return
 
@@ -102,7 +133,7 @@ def process_image_job(job_id: int) -> None:
             # this, the job would stay stuck at PROCESSING forever with no
             # error recorded.
             job.status = JobStatus.FAILED
-            job.error_message = f"Unexpected error: {e}"
+            job.error_message = _short_error_message(e)  # short, DB-safe
             db.commit()
             total_seconds = time.perf_counter() - started_at
             provider_seconds = time.perf_counter() - provider_started_at
@@ -119,12 +150,17 @@ def process_image_job(job_id: int) -> None:
                 batch_completed,
                 batch_failed,
                 batch_total,
+                # full traceback comes from logger.exception automatically
             )
             return
 
         provider_seconds = time.perf_counter() - provider_started_at
         storage_started_at = time.perf_counter()
-        key = f"{job.restaurant_id}/{job.menu_item_id}/{job.batch_id}/restyle_{job.id}.jpg"
+        key = storage.build_key(
+            batch_id=job.batch_id,
+            name=f"restyle_{job.variation_index}",
+            ext=settings.OUTPUT_IMAGE_FORMAT,
+        )
         path = storage.save(key=key, content=result.content)
         storage_seconds = time.perf_counter() - storage_started_at
 
@@ -161,7 +197,7 @@ def process_image_job(job_id: int) -> None:
             job = db.get(ImageJob, job_id)
             if job is not None and job.status != JobStatus.COMPLETED:
                 job.status = JobStatus.FAILED
-                job.error_message = f"Fatal worker error: {e}"
+                job.error_message = "Unexpected internal error."  # short, DB-safe
                 db.commit()
                 batch_total, batch_completed, batch_failed = _batch_status_counts(db, job.batch_id)
                 logger.error(
@@ -175,7 +211,7 @@ def process_image_job(job_id: int) -> None:
                     batch_completed,
                     batch_failed,
                     batch_total,
-                    e,
+                    e,  # full detail — terminal/log only
                 )
         except Exception:
             logger.exception("Could not even mark job %s as FAILED", job_id)

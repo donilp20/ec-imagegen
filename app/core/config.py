@@ -13,21 +13,19 @@ class Settings(BaseSettings):
     # --- Inference provider (image-to-image restyle only) ---
     REPLICATE_API_TOKEN: str = ""
     RESTYLE_MODEL: str = "black-forest-labs/flux-kontext-pro"
-    RESTYLE_PRICE_PER_IMAGE_USD: float = 0.04  # check Replicate's actual per-run price
+    RESTYLE_PRICE_PER_IMAGE_USD: float = 0.04
     RESTYLE_POLL_TIMEOUT_SECONDS: int = 180
 
     # --- Upload validation ---
     MAX_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB
-    ALLOWED_UPLOAD_CONTENT_TYPES: set[str] = {
-        "image/jpeg", "image/png", "image/webp", "image/heic", "image/jpg",
-    }
+    ALLOWED_IMAGE_FORMATS: str
 
-    # How many restyle variations to generate per upload, so the merchant can
-    # pick a favorite. Each variation is a separate ImageJob (same batch_id,
-    # same source_image_path) with a rotated style directive from
-    # prompt_builder.RESTYLE_VARIATION_STYLES.
+    # Currently None = feature disabled; extra_styling is ignored end-to-end
+    # (see jobs.py). Set to an integer in .env to enable merchant/backend
+    # styling notes with that max length, no code change needed.
+    MAX_EXTRA_STYLING_LEN: int | None = None
+
     MAX_RESTYLE_VARIATIONS: int = 3
-
     IMAGE_SIZE: str = "1024x1024"
 
     # --- Storage (local disk for now; swap for S3 client later) ---
@@ -37,19 +35,35 @@ class Settings(BaseSettings):
     S3_REGION: str = ""
 
     # --- DB / queue ---
-    DATABASE_URL: str = "postgresql+psycopg://postgres:Mitesh%40123@localhost:5432/ecimagegen"
+    DATABASE_URL: str
     REDIS_URL: str = "redis://localhost:6379/0"
     RQ_QUEUE_NAME: str = "imagegen"
+    # --- DB connection pool (Postgres only; ignored for SQLite) ---
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_RECYCLE_SECONDS: int = 1800  # 30 minutes
 
     # --- HTTP behavior towards the inference API ---
     REQUEST_TIMEOUT_SECONDS: int = 60
     MAX_RETRIES: int = 3
     RETRY_BACKOFF_SECONDS: float = 2.0
 
-    # RQ's default job_timeout (180s) is too short for restyle jobs, which can
-    # legitimately take several minutes (poll timeout + retries). Used at
-    # enqueue time in job_service.py.
+        # --- Inference provider (image-to-image restyle only) ---
+    REPLICATE_API_TOKEN: str = ""
+    RESTYLE_MODEL: str = "black-forest-labs/flux-kontext-pro"
+    RESTYLE_PRICE_PER_IMAGE_USD: float = 0.04
+    RESTYLE_POLL_TIMEOUT_SECONDS: int = 180
+
+    # Format Replicate returns the restyled output in, and the extension it's
+    # saved with. Not tied to the input format — every job outputs this same
+    # format regardless of what the merchant uploaded. Kept in .env so it can
+    # be changed (e.g. to "png") without a code deploy.
+    OUTPUT_IMAGE_FORMAT: str = "jpg"
     RESTYLE_JOB_TIMEOUT_SECONDS: int = 600
+
+    @property
+    def allowed_image_formats_set(self) -> set[str]:
+        return {f.strip().upper() for f in self.ALLOWED_IMAGE_FORMATS.split(",") if f.strip()}
 
 
 @lru_cache

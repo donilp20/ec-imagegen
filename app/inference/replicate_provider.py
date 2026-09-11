@@ -15,6 +15,15 @@ from app.inference.base import GeneratedImage, InferenceError, InferenceProvider
 
 logger = logging.getLogger(__name__)
 
+# Maps settings.OUTPUT_IMAGE_FORMAT -> the MIME type stored on GeneratedImage.
+# Add an entry here if OUTPUT_IMAGE_FORMAT is ever set to a format not listed.
+_FORMAT_TO_CONTENT_TYPE = {
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
+}
+
 
 class ReplicateRestyleProvider(InferenceProvider):
     def __init__(self, settings: Settings):
@@ -34,10 +43,11 @@ class ReplicateRestyleProvider(InferenceProvider):
     def _generate_sync(self, prompt: str, model: str, input_image: bytes) -> GeneratedImage:
         settings = self._settings
         last_err: Exception | None = None
+        output_format = settings.OUTPUT_IMAGE_FORMAT
 
         logger.info(
-            "Replicate restyle starting: model=%s, prompt_len=%d, image_size_bytes=%d",
-            model, len(prompt), len(input_image),
+            "Replicate restyle starting: model=%s, prompt_len=%d, image_size_bytes=%d, output_format=%s",
+            model, len(prompt), len(input_image), output_format,
         )
 
         for attempt in range(1, settings.MAX_RETRIES + 1):
@@ -47,7 +57,7 @@ class ReplicateRestyleProvider(InferenceProvider):
                     input={
                         "prompt": prompt,
                         "input_image": io.BytesIO(input_image),
-                        "output_format": "jpg",
+                        "output_format": output_format,
                     },
                 )
                 logger.info("Replicate prediction created: id=%s, status=%s", prediction.id, prediction.status)
@@ -84,9 +94,17 @@ class ReplicateRestyleProvider(InferenceProvider):
                 file_obj = output[0] if isinstance(output, list) else output
                 image_bytes = file_obj.read() if hasattr(file_obj, "read") else self._download(str(file_obj))
 
+                content_type = _FORMAT_TO_CONTENT_TYPE.get(output_format.lower())
+                if content_type is None:
+                    raise InferenceError(
+                        f"OUTPUT_IMAGE_FORMAT '{output_format}' has no known content-type mapping. "
+                        f"Add it to _FORMAT_TO_CONTENT_TYPE in replicate_provider.py.",
+                        retryable=False,
+                    )
+
                 return GeneratedImage(
                     content=image_bytes,
-                    content_type="image/jpeg",
+                    content_type=content_type,
                     provider="replicate",
                     model=model,
                     cost_usd=settings.RESTYLE_PRICE_PER_IMAGE_USD,
@@ -118,7 +136,6 @@ class ReplicateRestyleProvider(InferenceProvider):
                     if attempt == settings.MAX_RETRIES:
                         raise InferenceError(f"Replicate call failed after retries: {e}", retryable=True) from e
                 else:
-                    # Other 4xx (bad request, auth, bad model id) — not retryable.
                     raise InferenceError(f"Replicate rejected request (status={status}): {e}", retryable=False) from e
 
             except Exception as e:

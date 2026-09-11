@@ -27,29 +27,29 @@ class ImageJob(Base):
     """
     One row per generated image.
 
-    This service is image-to-image restyle only: the merchant uploads one
-    source photo, batch_id groups MAX_RESTYLE_VARIATIONS rows generated from
-    that same photo (each with a different style directive), and the
-    merchant picks their favorite. is_selected marks which variation was
-    picked; unlike the old draft->final flow, picking a restyle variation
-    does not trigger a re-render, since restyle output is already full
-    quality. At most one row per batch_id should have is_selected=True
-    (enforced in job_service, not the DB).
+    Restyle-only service: one uploaded source photo -> MAX_RESTYLE_VARIATIONS
+    rows sharing batch_id + source_image_path, each with a different
+    variation_index (-> a different rotated style directive, see
+    prompt_builder.RESTYLE_VARIATION_STYLES). The merchant picks a favorite;
+    is_selected marks it (enforced unique-per-batch in job_service, not DB).
+
+    The full prompt text is NOT stored — it's fully deterministic from
+    (variation_index, extra_styling), so it's rebuilt on demand in the
+    worker and logged there for debugging instead of persisted redundantly
+    across every row.
     """
     __tablename__ = "image_jobs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     batch_id: Mapped[str] = mapped_column(String(36), default=_uuid, index=True)
 
-    restaurant_id: Mapped[str] = mapped_column(String(64), index=True)
-    menu_item_id: Mapped[str] = mapped_column(String(64), index=True)
-
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.PENDING, index=True)
 
-    prompt: Mapped[str] = mapped_column(Text)
+    variation_index: Mapped[int] = mapped_column(Integer, default=0)
+    extra_styling: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     model_used: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
-    # Path to the merchant's original upload — required, every job here is a restyle job.
     source_image_path: Mapped[str] = mapped_column(String(512))
 
     is_selected: Mapped[bool] = mapped_column(Boolean, default=False)

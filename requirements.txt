@@ -10,3 +10,5 @@ python-dotenv==1.0.1
 replicate
 python-multipart
 requests
+pillow 
+pillow-heif

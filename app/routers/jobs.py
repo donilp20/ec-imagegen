@@ -1,4 +1,8 @@
+import io
+import logging
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from PIL import Image
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -7,28 +11,76 @@ from app.db.models import ImageJob
 from app.schemas import JobOut, RestyleBatchOut, SelectRestyleRequest
 from app.services import job_service
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
-
 settings = get_settings()
+
+# ─── HEIC/HEIF support (optional) ──────────────────────────────────────────
+# pillow-heif ships a compiled DLL that can be blocked by Windows Application
+# Control policies (WDAC/AppLocker) on locked-down machines. Import failures
+# here must NOT crash the whole app on startup — they should just disable
+# HEIC support so JPEG/PNG/WEBP uploads keep working.
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    HEIC_SUPPORTED = True
+except Exception:
+    logger.warning(
+        "pillow_heif unavailable — HEIC/HEIF uploads will be rejected until "
+        "this is resolved.",
+        exc_info=True,
+    )
+    HEIC_SUPPORTED = False
+# ────────────────────────────────────────────────────────────────────────────
+
+# Fixed technical mapping: Pillow's decoded format name -> file extension.
+# This is NOT a setting — it never changes. Which of these are *currently
+# allowed* is controlled by settings.ALLOWED_IMAGE_FORMATS (.env).
+_FORMAT_TO_EXT = {
+    "JPEG": "jpg",
+    "PNG": "png",
+    "WEBP": "webp",
+    "HEIF": "heic",  # pillow-heif reports HEIC/HEIF files as format "HEIF"
+}
+
+
+def _validate_and_get_ext(photo_bytes: bytes) -> str:
+    try:
+        with Image.open(io.BytesIO(photo_bytes)) as img:
+            img.verify()
+        with Image.open(io.BytesIO(photo_bytes)) as img:
+            fmt = img.format
+    except Exception:
+        raise HTTPException(status_code=415, detail="File is not a valid image.")
+
+    if fmt == "HEIF" and not HEIC_SUPPORTED:
+        raise HTTPException(
+            status_code=415,
+            detail="HEIC/HEIF uploads are currently unavailable on this server.",
+        )
+
+    allowed = settings.allowed_image_formats_set
+    if fmt not in allowed:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported image format '{fmt}'. Allowed: {', '.join(sorted(allowed))}.",
+        )
+
+    ext = _FORMAT_TO_EXT.get(fmt)
+    if ext is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Format '{fmt}' is allowed but has no known extension mapping.",
+        )
+    return ext
 
 
 @router.post("/restyle", response_model=RestyleBatchOut, status_code=201)
 async def create_restyle_batch(
-    photo: UploadFile = File(...),                      # required
-    restaurant_id: str | None = Form(None),              # optional
-    menu_item_id: str | None = Form(None),                # optional
-    extra_styling: str | None = Form(None),               # optional
+    photo: UploadFile = File(...),
+    extra_styling: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    if photo.content_type not in settings.ALLOWED_UPLOAD_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Unsupported file type '{photo.content_type}'. "
-                   f"Allowed: {', '.join(sorted(settings.ALLOWED_UPLOAD_CONTENT_TYPES))}",
-        )
-
-    # Read up to the limit + 1 byte so we can detect "too big" without
-    # loading an arbitrarily huge file into memory first.
     photo_bytes = await photo.read(settings.MAX_UPLOAD_SIZE_BYTES + 1)
     if len(photo_bytes) > settings.MAX_UPLOAD_SIZE_BYTES:
         raise HTTPException(
@@ -38,13 +90,18 @@ async def create_restyle_batch(
     if len(photo_bytes) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
+    photo_ext = _validate_and_get_ext(photo_bytes)
+
+    if settings.MAX_EXTRA_STYLING_LEN is None:
+        extra_styling = None
+    elif extra_styling is not None:
+        extra_styling = extra_styling.strip()[: settings.MAX_EXTRA_STYLING_LEN] or None
+
     jobs = job_service.create_restyle_batch(
         db,
-        restaurant_id=restaurant_id,
-        menu_item_id=menu_item_id,
         extra_styling=extra_styling,
         photo_bytes=photo_bytes,
-        photo_filename=photo.filename or "upload.jpg",
+        photo_ext=photo_ext,
     )
     return RestyleBatchOut(batch_id=jobs[0].batch_id, jobs=jobs)
 

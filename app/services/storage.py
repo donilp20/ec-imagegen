@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.config import Settings
@@ -11,8 +12,18 @@ class StorageBackend(ABC):
 
     @abstractmethod
     def read(self, path: str) -> bytes:
-        """Read back bytes previously saved at `path` (as returned by save())."""
         raise NotImplementedError
+
+    @staticmethod
+    def build_key(*, batch_id: str, name: str, ext: str) -> str:
+        """
+        e.g. batch_id=..., name='source' -> '<batch_id>/source_20260911_142033.jpeg'
+             batch_id=..., name='restyle_0' -> '<batch_id>/restyle_0_20260911_142240.jpg'
+        Timestamp is included so re-runs / retries never collide on the same key.
+        """
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        ext = ext.lstrip(".")
+        return f"{batch_id}/{name}_{timestamp}.{ext}"
 
 
 class LocalStorage(StorageBackend):
