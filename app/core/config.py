@@ -1,10 +1,13 @@
 from functools import lru_cache
 from pathlib import Path
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    _PROJECT_ROOT = Path(__file__).resolve().parents[2]
     model_config = SettingsConfigDict(
         env_file=str(_PROJECT_ROOT / ".env"),
         extra="ignore",
@@ -33,6 +36,17 @@ class Settings(BaseSettings):
     LOCAL_STORAGE_DIR: str = str(_PROJECT_ROOT / "storage")
     S3_BUCKET: str = ""
     S3_REGION: str = ""
+
+    @field_validator("LOCAL_STORAGE_DIR", mode="before")
+    @classmethod
+    def normalize_local_storage_dir(cls, value: str | None) -> str:
+        if value is None or value == "":
+            return str(_PROJECT_ROOT / "storage")
+
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = (_PROJECT_ROOT / path).resolve()
+        return str(path)
 
     # --- DB / queue ---
     DATABASE_URL: str
